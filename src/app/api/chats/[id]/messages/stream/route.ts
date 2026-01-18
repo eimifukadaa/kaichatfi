@@ -3,6 +3,17 @@ import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 
+// 🧹 CLEANER: Removes OCR noise like "sssss", "....", "-------"
+function cleanOCR(text: string): string {
+    if (!text) return ''
+    // Remove repeated non-alphanumeric junk characters (3+ times)
+    let cleaned = text.replace(/([^a-zA-Z0-9\s])\1{2,}/g, ' ')
+    // Remove repeated letters like "sssss"
+    cleaned = cleaned.replace(/([a-zA-Z])\1{4,}/gi, '$1')
+    // Remove excessive whitespace
+    return cleaned.replace(/\s+/g, ' ').trim()
+}
+
 // Stable model configuration
 const MODEL_NAME = 'gemini-1.5-flash'
 
@@ -11,6 +22,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     const supabase = await createClient()
 
     if (!supabase) {
+        console.error('[Stream] CRITICAL: Supabase client is null')
         return NextResponse.json({ error: 'Database connection failed' }, { status: 500 })
     }
 
@@ -50,47 +62,67 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
         console.error('Search error:', ragError)
     }
 
-    // 3. Prompt for Human-like response
     const contextText = chunks.length > 0
-        ? chunks.map(c => `[Dokumen: ${c.documents?.name}, Hal: ${c.page_number}] ${c.content}`).join('\n\n')
-        : 'Tidak ada dokumen yang relevan ditemukan.'
+        ? chunks.map(c => `[Dokumen: ${c.documents?.name}, Hal: ${c.page_number}] ${cleanOCR(c.content)}`).join('\n\n')
+        : 'Tidak ada konteks dokumen yang ditemukan.'
 
-    const systemPrompt = `Anda adalah PT.KAI AI CHAT. 
-Tugas Anda adalah menjawab pertanyaan pengguna secara natural dan profesional dalam Bahasa Indonesia, persis seperti ChatGPT.
+    const systemPrompt = `Anda adalah asisten cerdas PT.KAI (ChatGPT-style). 
+Nama Anda adalah PT.KAI AI CHAT. 
 
-Gunakan data dokumen di bawah sebagai referensi utama untuk menjawab. 
-Jika ada informasi yang kurang jelas di dokumen, gunakan pengetahuan umum Anda untuk melengkapi jawaban agar enak dibaca oleh manusia.
-
-JANGAN memberikan jawaban robotic atau daftar kaku. Berikan penjelasan yang mengalir.
+INSTRUKSI:
+1. Jawablah pertanyaan pengguna dengan gaya bahasa yang santai, profesional, dan sangat manusiawi (TIDAK ROBOTIC).
+2. Gunakan DATA DOKUMEN di bawah sebagai sumber utama.
+3. Jika dokumen berantakan (banyak karakter aneh), gunakan kecerdasan Anda untuk merapikannya sehingga pengguna mendapat jawaban yang jelas.
+4. Jika Anda tidak tahu, katakan sejujurnya dengan sopan.
+5. Jawab dalam Bahasa Indonesia yang baik.
 
 DATA DOKUMEN:
 ${contextText}
 
-PERTANYAAN: ${content}`
+PERTANYAAN PENGGUNA: 
+${content}`
 
-    // 4. Stream Response from Gemini
+    // 4. Gemini Execution with Multi-Model Fallback
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
         async start(controller) {
             let fullResponse = ''
-            try {
-                const model = genAI.getGenerativeModel({ model: MODEL_NAME })
-                const result = await model.generateContentStream(systemPrompt)
+            const modelsToTry = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
+            let success = false
 
-                for await (const chunk of result.stream) {
-                    const text = chunk.text()
-                    if (text) {
-                        fullResponse += text
-                        controller.enqueue(encoder.encode(text))
+            for (const modelName of modelsToTry) {
+                if (success) break
+                try {
+                    console.log(`[Gemini] Mencoba model: ${modelName}`)
+                    const model = genAI.getGenerativeModel({ model: modelName })
+                    const result = await model.generateContentStream(systemPrompt)
+
+                    for await (const chunk of result.stream) {
+                        const text = chunk.text()
+                        if (text) {
+                            fullResponse += text
+                            controller.enqueue(encoder.encode(text))
+                        }
                     }
+                    success = true
+                    console.log(`[Gemini] Berhasil menggunakan model: ${modelName}`)
+                } catch (err: any) {
+                    console.warn(`[Gemini] Gagal dengan model ${modelName}:`, err.message || err)
                 }
-            } catch (err: any) {
-                console.error('Gemini Error:', err)
-                // If Gemini fails, give a natural fallback, NOT a robotic list
-                const naturalFallback = `Berdasarkan dokumen KAI, ${chunks.length > 0 ? chunks[0].content : "informasi tersebut tidak ditemukan secara spesifik"}. Silakan coba tanyakan hal lain.`
-                fullResponse = naturalFallback
-                controller.enqueue(encoder.encode(naturalFallback))
+            }
+
+            if (!success) {
+                console.error('[Gemini] SEMUA MODEL GAGAL! Menggunakan Human-Fallback...')
+                // fallback natural, bukan robot
+                const firstHit = chunks[0]
+                const rawText = firstHit ? cleanOCR(firstHit.content) : ''
+                const fallbackMsg = firstHit
+                    ? `Berdasarkan dokumen KAI (${firstHit.documents?.name}), ini adalah informasi yang saya temukan:\n\n${rawText}\n\n*(Layanan AI sedang gangguan, saya menampilkan teks langsung dari dokumen)*`
+                    : "Maaf, saat ini saya tidak dapat memproses jawaban Anda karena gangguan teknis. Silakan coba lagi nanti."
+
+                fullResponse = fallbackMsg
+                controller.enqueue(encoder.encode(fallbackMsg))
             }
 
             // 5. Save assistant response and citations
