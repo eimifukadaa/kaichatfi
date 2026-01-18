@@ -18,7 +18,7 @@ export function ChatComposer({ onSend, disabled }: any) {
     useEffect(() => {
         if (typeof window !== 'undefined' && 'webkitSpeechRecognition' in window) {
             // @ts-ignore
-            const SpeechRecognition = window.webkitSpeechRecognition
+            const SpeechRecognition = (window as any).webkitSpeechRecognition
             recognitionRef.current = new SpeechRecognition()
             recognitionRef.current.continuous = false
             recognitionRef.current.lang = 'id-ID' // Indonesian default
