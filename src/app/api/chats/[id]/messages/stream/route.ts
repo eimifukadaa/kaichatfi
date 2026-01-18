@@ -7,10 +7,12 @@ import { v4 as uuidv4 } from 'uuid'
 // Helper to clean OCR noise from context
 function cleanText(text: string): string {
     if (!text) return ''
-    // Remove repeated punctuation like "......." or "-------"
-    text = text.replace(/([.\-_=]){3,}/g, ' ')
-    // Remove repeated characters (OCR artifacts) like "sssss"
-    text = text.replace(/([^ ])\1{3,}/g, '$1')
+    // Remove repeated punctuation/noise like "......." or "-------" or "ssssss"
+    text = text.replace(/([.\-_=s]){2,}/gi, ' ')
+    // Remove repeated vowel patterns (OCR artifacts) like "aaaa"
+    text = text.replace(/([aeiou])\1{2,}/gi, '$1')
+    // Remove repeated consonant patterns like "ccccc"
+    text = text.replace(/([bcdfghjklmnpqrstvwxyz])\1{2,}/gi, '$1')
     // Remove excessive whitespace
     return text.replace(/\s+/g, ' ').trim()
 }
@@ -68,7 +70,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
                 .select('id, content, page_number, document_id')
                 .eq('document_id', chat.document_id)
                 .textSearch('tsv', content, { type: 'websearch', config: 'simple' })
-                .limit(10)
+                .limit(20)
             if (error) throw error
             chunks = data || []
         } else {
@@ -77,7 +79,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
                 .from('document_chunks')
                 .select('id, content, page_number, document_id, documents!inner(name)')
                 .textSearch('tsv', content, { type: 'websearch', config: 'simple' })
-                .limit(15)
+                .limit(20)
             if (error) throw error
             chunks = data || []
         }
@@ -109,12 +111,12 @@ ${content}`
 
     const getGeminiResult = async (prompt: string) => {
         const models = [
-            'gemini-2.0-flash',
-            'gemini-2.0-flash-001',
             'gemini-1.5-flash',
             'gemini-1.5-flash-latest',
-            'gemini-pro',
+            'gemini-2.0-flash',
+            'gemini-2.0-flash-001',
             'gemini-1.5-pro',
+            'gemini-pro',
             'gemini-1.5-pro-latest'
         ]
         let lastError = null
@@ -174,18 +176,16 @@ ${content}`
                     }
                 }
             } catch (err: any) {
-                console.error('[Gemini] Final Service Error - Falling back to PDF-Only answer:', err.message || err)
+                console.error('[Gemini] Final Service Error - Falling back to natural PDF answer:', err.message || err)
 
-                // --- PDF ONLY FALLBACK LOGIC ---
                 if (chunks.length > 0) {
-                    fullResponse = `Berdasarkan dokumen KAI yang ditemukan, berikut adalah ringkasan informasi yang tersedia:\n\n`
-                    chunks.slice(0, 3).forEach((c, idx) => {
-                        const cleanedSnippet = cleanText(c.content).substring(0, 500)
-                        fullResponse += `**${c.documents?.name || 'Dokumen'} (Hal. ${c.page_number})**:\n${cleanedSnippet}${c.content.length > 500 ? '...' : ''}\n\n`
-                    })
-                    fullResponse += `\n*Catatan: Saat ini layanan AI kami sedang mengalami kendala teknis. Informasi di atas diambil langsung dari dokumen resmi KAI.*`
+                    // Find the most relevant paragraph (usually the first chunk)
+                    const topChunk = chunks[0]
+                    const cleanedContent = cleanText(topChunk.content)
+
+                    fullResponse = `Berdasarkan dokumen KAI, berikut adalah penjelasan yang ditemukan:\n\n**${cleanedContent}**\n\n*(Info ini diambil langsung dari dokumen ${topChunk.documents?.name || 'KAI'} hal. ${topChunk.page_number} karena layanan AI sedang dalam pemeliharaan)*`
                 } else {
-                    fullResponse = `Maaf, informasi tidak ditemukan dalam dokumen KAI. Layanan AI juga sedang tidak tersedia saat ini.`
+                    fullResponse = `Maaf, saya tidak dapat menemukan informasi tersebut dalam dokumen KAI. Silakan coba tanyakan detail lainnya.`
                 }
 
                 controller.enqueue(encoder.encode(fullResponse))
