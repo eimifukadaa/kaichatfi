@@ -4,14 +4,21 @@ import { NextResponse } from 'next/server'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { v4 as uuidv4 } from 'uuid'
 
-// Initialize Gemini
-
-// Initialize Gemini with safety and fallback
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
+// Helper to clean OCR noise from context
+function cleanText(text: string): string {
+    if (!text) return ''
+    // Remove repeated characters (OCR artifacts) like "sssss" or "......."
+    // Match any non-space character repeated 3 or more times
+    return text.replace(/([^ ])\1{2,}/g, '$1')
+}
 
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
     const { id: chatId } = await props.params
     const supabase = await createClient()
+
+    // Initialize Gemini inside POST to ensure env vars are fresh
+    const geminiKey = process.env.GEMINI_API_KEY || ''
+    const genAI = new GoogleGenerativeAI(geminiKey)
     const { data: { user } } = await supabase.auth.getUser()
 
     if (!user || !supabase) {
@@ -57,7 +64,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
                 .from('document_chunks')
                 .select('id, content, page_number, document_id')
                 .eq('document_id', chat.document_id)
-                .textSearch('tsv', content, { type: 'websearch', config: 'english' })
+                .textSearch('tsv', content, { type: 'websearch', config: 'simple' })
                 .limit(10)
             if (error) throw error
             chunks = data || []
@@ -66,8 +73,8 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
             const { data, error } = await supabase
                 .from('document_chunks')
                 .select('id, content, page_number, document_id, documents!inner(name)')
-                .textSearch('tsv', content, { type: 'websearch', config: 'english' })
-                .limit(10)
+                .textSearch('tsv', content, { type: 'websearch', config: 'simple' })
+                .limit(15)
             if (error) throw error
             chunks = data || []
         }
@@ -93,14 +100,6 @@ ${contextText}
 USER QUERY:
 ${content}`
 
-    // Helper to clean OCR noise from context
-    function cleanText(text: string): string {
-        if (!text) return ''
-        // Remove extreme sequences of repeated characters (OCR artifacts)
-        // Match any character repeated 4 or more times
-        return text.replace(/(.)\1{4,}/g, '$1')
-    }
-
     const getGeminiResult = async (prompt: string) => {
         const models = [
             'gemini-2.0-flash',
@@ -112,6 +111,10 @@ ${content}`
             'gemini-1.5-pro-latest'
         ]
         let lastError = null
+
+        if (!geminiKey) {
+            throw new Error('GEMINI_API_KEY is missing')
+        }
 
         for (const modelName of models) {
             try {
