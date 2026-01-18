@@ -14,8 +14,8 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
 
-    if (!user) {
-        console.error('[Stream] Unauthorized access attempt')
+    if (!user || !supabase) {
+        console.error('[Stream] Unauthorized or missing client')
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
@@ -79,7 +79,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
 
     // 3. Construct Context and Prompt
     const contextText = chunks.length > 0
-        ? chunks.map((c) => `[DOC: ${c.documents?.name || 'Knowledge Base'}] [PAGE: ${c.page_number}] \n${c.content}`).join('\n\n')
+        ? chunks.map((c) => `[DOC: ${c.documents?.name || 'Knowledge Base'}] [PAGE: ${c.page_number}] \n${cleanText(c.content)}`).join('\n\n')
         : 'No documents found for this query.'
 
     const systemPrompt = `You are PT.KAI AI CHAT, an expert assistant for KAI employees.
@@ -93,14 +93,23 @@ ${contextText}
 USER QUERY:
 ${content}`
 
-    // 4. Gemini Setup with Fallback
+    // Helper to clean OCR noise from context
+    function cleanText(text: string): string {
+        if (!text) return ''
+        // Remove extreme sequences of repeated characters (OCR artifacts)
+        // Match any character repeated 4 or more times
+        return text.replace(/(.)\1{4,}/g, '$1')
+    }
+
     const getGeminiResult = async (prompt: string) => {
         const models = [
             'gemini-2.0-flash',
             'gemini-2.0-flash-001',
-            'gemini-2.5-flash',
-            'gemini-flash-latest',
-            'gemini-pro-latest'
+            'gemini-1.5-flash',
+            'gemini-1.5-flash-latest',
+            'gemini-pro',
+            'gemini-1.5-pro',
+            'gemini-1.5-pro-latest'
         ]
         let lastError = null
 
@@ -151,13 +160,14 @@ ${content}`
 
                 // --- PDF ONLY FALLBACK LOGIC ---
                 if (chunks.length > 0) {
-                    fullResponse = `**[PDF Search Fallback]**\n\nBerdasarkan dokumen KAI yang ditemukan, berikut adalah informasi yang relevan:\n\n`
+                    fullResponse = `Berdasarkan dokumen KAI yang ditemukan, berikut adalah ringkasan informasi yang tersedia:\n\n`
                     chunks.slice(0, 3).forEach((c, idx) => {
-                        fullResponse += `${idx + 1}. **${c.documents?.name || 'Knowledge Base'} (Hal. ${c.page_number})**:\n> ${c.content.substring(0, 500)}${c.content.length > 500 ? '...' : ''}\n\n`
+                        const cleanedSnippet = cleanText(c.content).substring(0, 500)
+                        fullResponse += `**${c.documents?.name || 'Dokumen'} (Hal. ${c.page_number})**:\n${cleanedSnippet}${c.content.length > 500 ? '...' : ''}\n\n`
                     })
-                    fullResponse += `\n*Layanan AI sedang tidak tersedia, namun Anda tetap dapat melihat informasi langsung dari dokumen di atas.*`
+                    fullResponse += `\n*Catatan: Saat ini layanan AI kami sedang mengalami kendala teknis. Informasi di atas diambil langsung dari dokumen resmi KAI.*`
                 } else {
-                    fullResponse = `Maaf, informasi tidak ditemukan dalam dokumen KAI yang diupload and AI service tidak tersedia.`
+                    fullResponse = `Maaf, informasi tidak ditemukan dalam dokumen KAI. Layanan AI juga sedang tidak tersedia saat ini.`
                 }
 
                 controller.enqueue(encoder.encode(fullResponse))
