@@ -1,0 +1,10 @@
+.git
+.next
+node_modules
+.vercel
+*.log
+setup-deployment.ps1
+README.md
+implementation_plan.md
+task.md
+walkthrough.md
