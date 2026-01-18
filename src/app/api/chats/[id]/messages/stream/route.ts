@@ -7,9 +7,12 @@ import { v4 as uuidv4 } from 'uuid'
 // Helper to clean OCR noise from context
 function cleanText(text: string): string {
     if (!text) return ''
-    // Remove repeated characters (OCR artifacts) like "sssss" or "......."
-    // Match any non-space character repeated 3 or more times
-    return text.replace(/([^ ])\1{2,}/g, '$1')
+    // Remove repeated punctuation like "......." or "-------"
+    text = text.replace(/([.\-_=]){3,}/g, ' ')
+    // Remove repeated characters (OCR artifacts) like "sssss"
+    text = text.replace(/([^ ])\1{3,}/g, '$1')
+    // Remove excessive whitespace
+    return text.replace(/\s+/g, ' ').trim()
 }
 
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
@@ -89,10 +92,14 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
         ? chunks.map((c) => `[DOC: ${c.documents?.name || 'Knowledge Base'}] [PAGE: ${c.page_number}] \n${cleanText(c.content)}`).join('\n\n')
         : 'No documents found for this query.'
 
-    const systemPrompt = `You are PT.KAI AI CHAT, an expert assistant for KAI employees.
-Answer the user query based ONLY on the provided context.
-If the answer is not in the context, say exactly: "Maaf, informasi tersebut tidak ditemukan dalam dokumen KAI yang diupload."
-Maintain a professional and helpful tone.
+    const systemPrompt = `Anda adalah PT.KAI AI CHAT, asisten cerdas dan ramah untuk karyawan KAI.
+Tugas Anda adalah memberikan jawaban yang manusiawi, natural, dan akurat seperti ChatGPT.
+
+Gunakan CONTEXT di bawah sebagai referensi utama. 
+Jika CONTEXT mengandung banyak noise (seperti "sssss" atau karakter aneh hasil scan), abaikan noise tersebut dan gunakan pengetahuan Anda untuk merapikan informasi bagi pengguna.
+Jika Anda sudah tahu definisinya (seperti arti "KRL"), sampaikan dengan bahasa yang profesional namun tetap mudah dimengerti.
+
+JANGAN memberikan jawaban robotic. Berikan penjelasan yang lengkap.
 
 CONTEXT:
 ${contextText}
@@ -119,7 +126,15 @@ ${content}`
         for (const modelName of models) {
             try {
                 console.log(`[Gemini] Attempting ${modelName}...`)
-                const model = genAI.getGenerativeModel({ model: modelName })
+                const model = genAI.getGenerativeModel({
+                    model: modelName,
+                    safetySettings: [
+                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+                    ]
+                })
                 const result = await model.generateContentStream(prompt)
                 return { result, modelName }
             } catch (err: any) {
