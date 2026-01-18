@@ -1,7 +1,7 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai'
 import { v4 as uuidv4 } from 'uuid'
 
 // Helper to clean OCR noise from context
@@ -22,7 +22,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     // Initialize Gemini inside POST to ensure env vars are fresh
     const geminiKey = process.env.GEMINI_API_KEY || ''
     const genAI = new GoogleGenerativeAI(geminiKey)
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { user } } = await supabase!.auth.getUser()
 
     if (!user || !supabase) {
         console.error('[Stream] Unauthorized or missing client')
@@ -129,10 +129,10 @@ ${content}`
                 const model = genAI.getGenerativeModel({
                     model: modelName,
                     safetySettings: [
-                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
                     ]
                 })
                 const result = await model.generateContentStream(prompt)
