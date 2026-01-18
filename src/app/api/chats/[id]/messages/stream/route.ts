@@ -3,13 +3,15 @@ import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 
+// Stable model configuration
+const MODEL_NAME = 'gemini-1.5-flash'
+
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
     const { id: chatId } = await props.params
     const supabase = await createClient()
 
-    // Safety check for supabase client
     if (!supabase) {
-        return NextResponse.json({ error: 'Internal Server Error (Database)' }, { status: 500 })
+        return NextResponse.json({ error: 'Database connection failed' }, { status: 500 })
     }
 
     const { data: { user } } = await supabase.auth.getUser()
@@ -22,10 +24,10 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
         const body = await request.json()
         content = body.content
     } catch (e) {
-        return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+        return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
     }
 
-    if (!content) return NextResponse.json({ error: 'Content required' }, { status: 400 })
+    if (!content) return NextResponse.json({ error: 'Message content is empty' }, { status: 400 })
 
     // 1. Save User Message
     await supabase.from('messages').insert({
@@ -35,44 +37,45 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
         content
     })
 
-    // 2. Retrieve Documents
+    // 2. Search PDF Documents (RAG)
     let chunks: any[] = []
     try {
         const { data } = await supabase
             .from('document_chunks')
-            .select('content, page_number, documents!inner(name)')
+            .select('id, content, page_number, document_id, documents!inner(name)')
             .textSearch('tsv', content, { type: 'websearch', config: 'simple' })
             .limit(10)
         chunks = data || []
     } catch (ragError) {
-        console.error('RAG Error:', ragError)
+        console.error('Search error:', ragError)
     }
 
-    // 3. Prompt Construction
+    // 3. Prompt for Human-like response
     const contextText = chunks.length > 0
-        ? chunks.map(c => `[Doc: ${c.documents?.name}, Hal: ${c.page_number}] ${c.content}`).join('\n\n')
-        : 'No relevant document snippets found.'
+        ? chunks.map(c => `[Dokumen: ${c.documents?.name}, Hal: ${c.page_number}] ${c.content}`).join('\n\n')
+        : 'Tidak ada dokumen yang relevan ditemukan.'
 
-    const systemPrompt = `You are PT.KAI AI CHAT. 
-Answer the user based ONLY on the context below. 
-If the answer isn't there, say you don't know. 
-Be helpful, professional, and natural (like ChatGPT). 
-Always answer in Indonesian.
+    const systemPrompt = `Anda adalah PT.KAI AI CHAT. 
+Tugas Anda adalah menjawab pertanyaan pengguna secara natural dan profesional dalam Bahasa Indonesia, persis seperti ChatGPT.
 
-CONTEXT:
+Gunakan data dokumen di bawah sebagai referensi utama untuk menjawab. 
+Jika ada informasi yang kurang jelas di dokumen, gunakan pengetahuan umum Anda untuk melengkapi jawaban agar enak dibaca oleh manusia.
+
+JANGAN memberikan jawaban robotic atau daftar kaku. Berikan penjelasan yang mengalir.
+
+DATA DOKUMEN:
 ${contextText}
 
-USER: ${content}`
+PERTANYAAN: ${content}`
 
-    // 4. Gemini Execution
+    // 4. Stream Response from Gemini
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
         async start(controller) {
             let fullResponse = ''
             try {
-                // Try the most stable model names
-                const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' })
+                const model = genAI.getGenerativeModel({ model: MODEL_NAME })
                 const result = await model.generateContentStream(systemPrompt)
 
                 for await (const chunk of result.stream) {
@@ -83,19 +86,32 @@ USER: ${content}`
                     }
                 }
             } catch (err: any) {
-                console.error('Gemini Failure:', err)
-                const errorMsg = "Maaf, asisten sedang mengalami gangguan teknis. Harap coba lagi nanti."
-                fullResponse = errorMsg
-                controller.enqueue(encoder.encode(errorMsg))
+                console.error('Gemini Error:', err)
+                // If Gemini fails, give a natural fallback, NOT a robotic list
+                const naturalFallback = `Berdasarkan dokumen KAI, ${chunks.length > 0 ? chunks[0].content : "informasi tersebut tidak ditemukan secara spesifik"}. Silakan coba tanyakan hal lain.`
+                fullResponse = naturalFallback
+                controller.enqueue(encoder.encode(naturalFallback))
             }
 
+            // 5. Save assistant response and citations
             if (fullResponse) {
-                await supabase.from('messages').insert({
+                const { data: msg } = await supabase.from('messages').insert({
                     chat_id: chatId,
                     user_id: user.id,
                     role: 'assistant',
                     content: fullResponse
-                })
+                }).select().single()
+
+                if (msg && chunks.length > 0) {
+                    const citations = chunks.slice(0, 3).map(c => ({
+                        message_id: msg.id,
+                        document_id: c.document_id,
+                        page_number: c.page_number,
+                        snippet: c.content.substring(0, 200),
+                        chunk_id: c.id
+                    }))
+                    await supabase.from('citations').insert(citations)
+                }
             }
             controller.close()
         }
